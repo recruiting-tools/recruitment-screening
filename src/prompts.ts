@@ -199,8 +199,12 @@ Return a JSON array. Each element:
   "id": "q1",
   "topic": "short topic name",
   "question": "the full interview question",
-  "follow_ups": ["follow-up #1", "follow-up #2"] or null if 0 follow-ups requested
-}`;
+  "follow_ups": ["follow-up #1", "follow-up #2"] or null if 0 follow-ups requested,
+  "original": "only for [REFINE] — the original draft text as given",
+  "improvements": ["only for [REFINE] — list of what you changed and why, e.g. 'Compound question (3 topics) → split into single topic: professional background'"]
+}
+For [KEEP AS-IS] and [GENERATE] questions, omit "original" and "improvements".
+For [REFINE] questions, ALWAYS include both "original" and "improvements".`;
 
   return { system, user: buildGenerateUserPrompt(req, defaultFollowUps) };
 }
@@ -209,7 +213,7 @@ function buildGenerateUserPrompt(req: GenerateQuestionsRequest, defaultFollowUps
   const parts: string[] = [];
 
   // Context
-  parts.push(`Job Title: ${req.job_title}`);
+  if (req.job_title) parts.push(`Job Title: ${req.job_title}`);
   if (req.job_description) parts.push(`\nJob Description:\n${req.job_description}`);
   if (req.resume_text) parts.push(`\nCandidate Resume:\n${req.resume_text}`);
 
@@ -235,9 +239,9 @@ function buildGenerateUserPrompt(req: GenerateQuestionsRequest, defaultFollowUps
         parts.push(`\n${n}. [GENERATE]${spec.topic ? ` topic: "${spec.topic}"` : ''} | follow-ups: ${fu}`);
       }
     });
-    parts.push(`\nFor [KEEP AS-IS]: use the exact question text provided, only generate follow-ups.`);
-    parts.push(`For [REFINE]: improve clarity, make it open-ended and voice-ready, then generate follow-ups.`);
-    parts.push(`For [GENERATE]: create a new question based on the topic (or infer a good topic from context), then generate follow-ups.`);
+    parts.push(`\nFor [KEEP AS-IS]: use the exact question text provided, only generate follow-ups. Do NOT include "original" or "improvements" fields.`);
+    parts.push(`For [REFINE]: improve clarity, make it open-ended and voice-ready, then generate follow-ups. You MUST include "original" (the exact draft text) and "improvements" (array of strings explaining each change you made and why). Be specific: "Compound question (3 topics in one) → split to focus on professional background only", "Closed question → rewritten as open-ended storytelling prompt".`);
+    parts.push(`For [GENERATE]: create a new question based on the topic (or infer a good topic from context), then generate follow-ups. Do NOT include "original" or "improvements" fields.`);
   } else {
     const count = req.count ?? 6;
     parts.push(`\nGenerate ${count} interview questions with ${defaultFollowUps} follow-up(s) each.`);

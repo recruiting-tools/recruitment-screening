@@ -85,8 +85,8 @@ export interface ComplianceCheckConfig {
 }
 
 export interface GenerateQuestionsRequest {
-  // ── Context (job_title required) ──
-  job_title: string;
+  // ── Context (job_title optional when questions[] provided) ──
+  job_title?: string;
   job_description?: string;
   resume_text?: string;
 
@@ -123,6 +123,10 @@ export interface GeneratedQuestion {
   topic: string;
   question: string;
   follow_ups: string[] | null;
+  /** Original draft text (only present for [REFINE] questions) */
+  original?: string;
+  /** What was improved and why (only present for [REFINE] questions) */
+  improvements?: string[];
 }
 
 /** interview-engine compatible format */
@@ -131,6 +135,10 @@ export interface InterviewEngineQuestion {
   topic: string;
   question: string;
   followUpIfVague: string[] | null;
+  /** Original draft text (only present for [REFINE] questions) */
+  original?: string;
+  /** What was improved and why (only present for [REFINE] questions) */
+  improvements?: string[];
 }
 
 export interface ComplianceResult {

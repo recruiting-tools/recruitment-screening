@@ -1,6 +1,6 @@
 # recruitment-screening
 
-Stateless Cloudflare Worker that evaluates candidate resumes against job descriptions using Gemini LLM. Returns screening results (for candidate), evaluation scores (for recruiter), and generates voice-interview questions with follow-ups.
+Stateless Cloudflare Worker that evaluates candidate resumes against job descriptions using Gemini LLM. Returns screening results (for candidate), evaluation scores (for recruiter), generates voice-interview questions with follow-ups, and runs pipeline conversation logic (init, analyse, write-message, completion, validate).
 
 ## Architecture
 
@@ -13,6 +13,13 @@ POST /evaluate → Resume screening + evaluation
 
 POST /generate-questions → Interview question generation
   Auth → Gemini (with best-practice prompt) → Optional compliance check → JSON
+
+POST /pipeline/init           → Initialize pipeline goals + summary from resume
+POST /pipeline/analyse        → Update goals/summary after candidate reply
+POST /pipeline/write-message  → Generate next message to candidate
+POST /pipeline/completion     → Generate final wrap-up message
+POST /pipeline/validate-message → Quality check before sending
+  All pipeline: Auth → Gemini 2.5 Flash (with retry) → JSON
 ```
 
 **No database. No state. Pure functions.**
@@ -20,19 +27,28 @@ POST /generate-questions → Interview question generation
 ## Tech Stack
 
 - **Runtime**: Cloudflare Worker
-- **LLM**: Google Gemini 2.0 Flash (`gemini-2.0-flash`) via REST API
+- **LLM**: Gemini 2.0 Flash (evaluate, questions) + Gemini 2.5 Flash (pipeline) via REST API
 - **Language**: TypeScript
-- **Key rotation**: Round-robin across comma-separated `GEMINI_API_KEYS`
+- **Key rotation**: Round-robin for evaluate/questions, retry-with-rotation for pipeline
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `src/index.ts` | Worker entry: routing, auth, handlers (evaluate, generate-questions), compliance check |
-| `src/types.ts` | All TypeScript interfaces (Env, requests, responses, question specs) |
-| `src/prompts.ts` | Prompt builders: screening, evaluation, legacy questions, **generate-questions** (with best-practice guide) |
-| `src/gemini.ts` | Gemini API client with round-robin key rotation (`pickKey`) |
+| `src/index.ts` | Worker entry: routing, auth, handlers (evaluate, generate-questions, pipeline/*) |
+| `src/types.ts` | TypeScript interfaces (Env, evaluate/questions requests & responses) |
+| `src/prompts.ts` | Prompt builders: screening, evaluation, legacy questions, generate-questions |
+| `src/gemini.ts` | Gemini API client: `askGemini` (single key), `askGeminiWithRetry` (rotation + 429 retry) |
 | `src/docs.ts` | Self-documenting HTML page served at `GET /` |
+| `src/pipeline/types.ts` | Pipeline request/response interfaces for all 5 endpoints |
+| `src/pipeline/prompts.ts` | Pipeline prompt builders + style rules (from candidate-routing prompt-catalog) |
+| `src/pipeline/init.ts` | `POST /pipeline/init` — resume → goals + summary |
+| `src/pipeline/analyse.ts` | `POST /pipeline/analyse` — candidate reply → updated goals/summary |
+| `src/pipeline/write-message.ts` | `POST /pipeline/write-message` — generate next message |
+| `src/pipeline/completion.ts` | `POST /pipeline/completion` — final wrap-up message |
+| `src/pipeline/validate.ts` | `POST /pipeline/validate-message` — quality checks (deterministic + LLM) |
+| `src/lib/goal-utils.ts` | Goal structure utilities: `enforceGoalStructure`, `markActiveActionsDone`, etc. |
+| `src/lib/text-utils.ts` | Text helpers: `stripNamePlaceholders`, `ensureMarkdownString`, `parseJsonFromLLM` |
 | `wrangler.jsonc` | Cloudflare Worker config |
 | `.dev.vars` | Local secrets for `wrangler dev` (gitignored) |
 
@@ -152,6 +168,86 @@ Question spec logic:
 }
 ```
 
+### Pipeline Endpoints
+
+All pipeline endpoints require `Authorization: Bearer <AUTH_TOKEN>`. All use Gemini 2.5 Flash with key rotation + retry on 429/5xx. Every response includes a `request_id`.
+
+#### `POST /pipeline/init`
+
+Initialize pipeline for a new candidate. Analyzes resume against job description, generates goals and summary.
+
+```json
+// Request
+{ "candidate": { "name": "Marco Rossi", "language": "it" },
+  "resume_text": "...", "job": { "title": "...", "description": "...", "must_haves": [...] },
+  "pipeline_template": "## Goal 1: Screening\n- [pending] Confirm..." }
+
+// Response
+{ "request_id": "req_abc123", "summary": "## Candidate Summary...",
+  "goals": "## Goal 1: Screening [active]\n- [active] Confirm...", "first_item": "Confirm..." }
+```
+
+#### `POST /pipeline/analyse`
+
+Update goals and summary after a candidate reply. Enforces goal structure against template, detects side questions.
+
+```json
+// Request
+{ "candidate": {...}, "summary": "current", "goals": "current",
+  "candidate_reply": "Sì, ho 10 anni...", "conversation_history": [...],
+  "pipeline_template": "..." }
+
+// Response
+{ "request_id": "...", "summary": "updated", "goals": "updated",
+  "all_done": false, "next_item": "Ask about...", "goal_just_completed": null,
+  "candidate_question": null }
+```
+
+#### `POST /pipeline/write-message`
+
+Generate next message to candidate. Supports follow-ups, goal transitions, FAQ mode, action items.
+
+```json
+// Request
+{ "candidate": {...}, "next_item": "Ask about hybrid work",
+  "conversation_history": [...], "job": { "title": "...", "interviewer_name": "Vladimir" },
+  "context": { "is_follow_up": false, "goal_just_completed": null, "candidate_question": null } }
+
+// Response
+{ "request_id": "...", "message": "Grazie Marco!...", "model_used": "gemini-2.5-flash" }
+```
+
+#### `POST /pipeline/completion`
+
+Final wrap-up message when all goals are completed.
+
+```json
+// Request
+{ "candidate": {...}, "summary": "final summary",
+  "conversation_history": [...], "job": { "title": "...", "interviewer_name": "Vladimir" } }
+
+// Response
+{ "request_id": "...", "message": "Marco, grazie mille..." }
+```
+
+#### `POST /pipeline/validate-message`
+
+Quality check before sending. Runs deterministic checks (placeholders, length, generic greetings) + LLM checks (repeated questions, tone, contradictions).
+
+```json
+// Request
+{ "recent_messages": [...], "proposed_message": "Grazie Marco!...",
+  "candidate": { "name": "Marco Rossi", "language": "it" } }
+
+// Response — ok
+{ "request_id": "...", "ok": true, "issues": [] }
+
+// Response — issues found
+{ "request_id": "...", "ok": false, "issues": [
+  { "severity": "high", "type": "repeated_question", "description": "Already asked..." }
+] }
+```
+
 ### `GET /`
 
 Self-documenting API page with endpoints, examples, request/response formats, and a guide on writing interview questions. Served as HTML.
@@ -261,7 +357,17 @@ if (env.RESUME_EVAL_API_URL) {
 
 ## Integration with candidate-routing
 
-candidate-routing has its own `evaluateResume()` and `screenResumeForApply()` in `src/lib/resume-eval.ts` (using OpenAI). These can be gradually migrated to call this service instead.
+### Pipeline (shadow mode — Phase 1)
+
+candidate-routing continues using its own `llm.ts` as primary. Parallel calls to this API for comparison:
+- `SCREENING_API_URL` → this worker's URL
+- `SCREENING_API_TOKEN` → same as `AUTH_TOKEN`
+- Shadow client: `src/lib/screening-client.ts` in candidate-routing
+- Logs diff metrics (length, latency) but sends old result to candidate
+
+### Resume evaluation
+
+candidate-routing has its own `evaluateResume()` and `screenResumeForApply()` in `src/lib/resume-eval.ts` (using OpenAI). These can be gradually migrated to call this service's `/evaluate` endpoint.
 
 ## Prompt Design
 
@@ -278,10 +384,31 @@ candidate-routing has its own `evaluateResume()` and `screenResumeForApply()` in
 
 All prompts support currency conversion (KZT/USD/EUR/RUB) and multi-language output (en/ru/it).
 
+### Pipeline Prompts (in `src/pipeline/prompts.ts`)
+
+Migrated from candidate-routing's `prompt-catalog.ts`:
+- **Init** (`buildInitSystemPrompt/UserPrompt`): Generates goals + summary from resume. Supports pipeline templates.
+- **Analyse** (`buildAnalyseSystemPrompt/UserPrompt`): Updates goals/summary after candidate reply. Prompt injection protection. QUESTION vs ACTION item distinction.
+- **Writer** (`buildWriterSystemPrompt/UserPrompt`): Composes next message. Supports FAQ mode, goal transitions, action items, follow-ups.
+- **Completion** (`buildCompletionSystemPrompt/UserPrompt`): Final wrap-up (80-120 words).
+- **Validate** (`buildValidateSystemPrompt/UserPrompt`): Quality checks for proposed messages.
+- **Style rules** (`styleRulesFor`): Anti-placeholder, anti-"yes but no", formal register rules.
+
+### Goal Structure (`src/lib/goal-utils.ts`)
+
+Markdown-based goal tracking with sequential execution:
+- `enforceGoalStructure()` — validates LLM output against template, prevents regression, restores missing goals
+- `markActiveActionsDone()` — post-writer processing: marks ACTION items done, handles goal completion chain
+- `findNewlyActivatedItems()` / `findNewlyDoneItems()` — diff helpers for state transitions
+
 ## Next Steps
 
 - [ ] Deploy to Cloudflare (`wrangler deploy`)
 - [ ] Set production secrets (`GEMINI_API_KEYS`, `AUTH_TOKEN`)
 - [ ] Integrate in apply-via-resume `handleConfirm()`
-- [ ] Test end-to-end with real gate: `https://apply-via-resume.dev-a96.workers.dev/njm5b5/1-ux-engineer`
-- [ ] Consider: retry with next key on 429 (currently fails on first 429)
+- [ ] Shadow mode client in candidate-routing (`src/lib/screening-client.ts`)
+- [ ] Connect shadow mode to `pipelineWriteMessage` in candidate-routing
+- [ ] Add vitest + unit tests for goal-utils and text-utils
+- [ ] Add integration tests with real production dialogs (5+ fixtures)
+- [ ] Phase 2: switch candidate-routing to use this API as primary (not shadow)
+- [ ] Phase 3: externalize prompts to `hiring-pipeline-config` repo

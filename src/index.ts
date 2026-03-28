@@ -7,6 +7,17 @@ import { askGemini, parseJSON, pickKey } from './gemini';
 import { buildScreeningPrompt, buildEvaluationPrompt, buildQuestionsPrompt, buildGenerateQuestionsPrompt } from './prompts';
 import { renderDocs } from './docs';
 
+// Pipeline handlers
+import type {
+  PipelineInitRequest, PipelineAnalyseRequest, PipelineWriteMessageRequest,
+  PipelineCompletionRequest, PipelineValidateRequest,
+} from './pipeline/types';
+import { handlePipelineInit } from './pipeline/init';
+import { handlePipelineAnalyse } from './pipeline/analyse';
+import { handlePipelineWriteMessage } from './pipeline/write-message';
+import { handlePipelineCompletion } from './pipeline/completion';
+import { handlePipelineValidate } from './pipeline/validate';
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     // CORS preflight
@@ -38,9 +49,86 @@ export default {
       return handleGenerateQuestions(request, env);
     }
 
+    // ── Pipeline endpoints ────────────────────────────────────────────────
+    if (url.pathname.startsWith('/pipeline/') && request.method === 'POST') {
+      return handlePipeline(url.pathname, request, env);
+    }
+
     return json({ error: 'Not found' }, 404);
   },
 } satisfies ExportedHandler<Env>;
+
+// ── Pipeline router ─────────────────────────────────────────────────────────
+
+async function handlePipeline(pathname: string, request: Request, env: Env): Promise<Response> {
+  // Auth
+  const authHeader = request.headers.get('Authorization');
+  if (authHeader !== `Bearer ${env.AUTH_TOKEN}`) {
+    return json({ error: 'Unauthorized' }, 401);
+  }
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: 'Invalid JSON body' }, 400);
+  }
+
+  try {
+    switch (pathname) {
+      case '/pipeline/init': {
+        const req = body as PipelineInitRequest;
+        if (!req.candidate?.name) return json({ error: 'candidate.name is required' }, 400);
+        if (!req.resume_text?.trim()) return json({ error: 'resume_text is required' }, 400);
+        if (!req.job?.title) return json({ error: 'job.title is required' }, 400);
+        const result = await handlePipelineInit(req, env);
+        return json(result);
+      }
+
+      case '/pipeline/analyse': {
+        const req = body as PipelineAnalyseRequest;
+        if (!req.candidate?.name) return json({ error: 'candidate.name is required' }, 400);
+        if (!req.goals?.trim()) return json({ error: 'goals is required' }, 400);
+        if (!req.candidate_reply?.trim()) return json({ error: 'candidate_reply is required' }, 400);
+        const result = await handlePipelineAnalyse(req, env);
+        return json(result);
+      }
+
+      case '/pipeline/write-message': {
+        const req = body as PipelineWriteMessageRequest;
+        if (!req.candidate?.name) return json({ error: 'candidate.name is required' }, 400);
+        if (!req.next_item?.trim()) return json({ error: 'next_item is required' }, 400);
+        if (!req.job?.title) return json({ error: 'job.title is required' }, 400);
+        const result = await handlePipelineWriteMessage(req, env);
+        return json(result);
+      }
+
+      case '/pipeline/completion': {
+        const req = body as PipelineCompletionRequest;
+        if (!req.candidate?.name) return json({ error: 'candidate.name is required' }, 400);
+        if (!req.summary?.trim()) return json({ error: 'summary is required' }, 400);
+        if (!req.job?.title) return json({ error: 'job.title is required' }, 400);
+        const result = await handlePipelineCompletion(req, env);
+        return json(result);
+      }
+
+      case '/pipeline/validate-message': {
+        const req = body as PipelineValidateRequest;
+        if (!req.candidate?.name) return json({ error: 'candidate.name is required' }, 400);
+        if (!req.proposed_message?.trim()) return json({ error: 'proposed_message is required' }, 400);
+        const result = await handlePipelineValidate(req, env);
+        return json(result);
+      }
+
+      default:
+        return json({ error: `Unknown pipeline endpoint: ${pathname}` }, 404);
+    }
+  } catch (err) {
+    console.error(`[${pathname}] Error:`, err);
+    const message = err instanceof Error ? err.message : 'Internal error';
+    return json({ error: message }, 500);
+  }
+}
 
 // ── Main handler ─────────────────────────────────────────────────────────────
 
@@ -110,7 +198,9 @@ async function handleGenerateQuestions(request: Request, env: Env): Promise<Resp
     return json({ error: 'Invalid JSON body' }, 400);
   }
 
-  if (!req.job_title?.trim()) return json({ error: 'job_title is required' }, 400);
+  if (!req.job_title?.trim() && !req.questions?.length) {
+    return json({ error: 'job_title is required (or provide questions[])' }, 400);
+  }
   if (!req.job_description?.trim() && !req.questions?.length) {
     return json({ error: 'job_description or questions[] is required' }, 400);
   }
@@ -133,7 +223,7 @@ async function handleGenerateQuestions(request: Request, env: Env): Promise<Resp
       response.compliance = await runComplianceCheck(
         generated,
         req.compliance_check,
-        req.job_title,
+        req.job_title ?? 'General',
       );
     }
 
@@ -146,12 +236,15 @@ async function handleGenerateQuestions(request: Request, env: Env): Promise<Resp
 }
 
 function toInterviewEngineFormat(q: GeneratedQuestion): InterviewEngineQuestion {
-  return {
+  const result: InterviewEngineQuestion = {
     id: q.id,
     topic: q.topic,
     question: q.question,
     followUpIfVague: q.follow_ups,
   };
+  if (q.original) result.original = q.original;
+  if (q.improvements?.length) result.improvements = q.improvements;
+  return result;
 }
 
 async function runComplianceCheck(
