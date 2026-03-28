@@ -1,11 +1,12 @@
 # recruitment-screening
 
-Stateless Cloudflare Worker that evaluates candidate resumes and generates voice-interview questions with follow-ups. Powered by Gemini 2.0 Flash.
+Stateless Cloudflare Worker that evaluates candidate resumes, generates voice-interview questions, and runs pipeline conversation logic for automated candidate screening. Powered by Gemini 2.5 Flash.
 
 ## What it does
 
 - **Resume evaluation** — screens resumes against job descriptions, returns candidate-facing results + recruiter-facing scores (0–100)
 - **Question generation** — creates interview questions with follow-ups, ready for voice interviews. Supports simple mode (just count) and advanced mode (per-question control: generate / refine / keep as-is)
+- **Pipeline conversation** — goal-based candidate screening pipeline with 5 stateless endpoints: init, analyse, write-message, completion, validate. Sequential goal execution with markdown-based state tracking
 - **Compliance check** — optionally validates generated questions against [interview-engine](https://github.com/recruiting-tools/interview-engine) API
 - **Self-documenting** — `GET /` serves a live API reference with examples and a question-writing guide
 
@@ -17,6 +18,11 @@ Stateless Cloudflare Worker that evaluates candidate resumes and generates voice
 | `GET` | `/health` | Health check |
 | `POST` | `/evaluate` | Resume screening + evaluation |
 | `POST` | `/generate-questions` | Interview question generation |
+| `POST` | `/pipeline/init` | Initialize pipeline goals + summary from resume |
+| `POST` | `/pipeline/analyse` | Update goals/summary after candidate reply |
+| `POST` | `/pipeline/write-message` | Generate next message to candidate |
+| `POST` | `/pipeline/completion` | Generate final wrap-up message |
+| `POST` | `/pipeline/validate-message` | Quality check before sending |
 
 All POST endpoints require `Authorization: Bearer <token>`.
 
@@ -119,6 +125,73 @@ curl -X POST http://localhost:8787/evaluate \
 
 Returns screening (candidate-facing), evaluation with score 0–100 (recruiter-facing), and optional interview questions.
 
+## Pipeline — goal-based candidate screening
+
+The pipeline endpoints power automated candidate conversations. Each call is stateless — the caller manages state between calls.
+
+**Flow**: `init` → loop(`analyse` → `write-message`) → `completion`
+
+```bash
+# 1. Initialize — parse resume, set up goals
+curl -X POST http://localhost:8787/pipeline/init \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer test-token-local" \
+  -d '{
+    "candidate": { "name": "John Miller", "language": "en" },
+    "resume_text": "John Miller, 15 years corporate finance, CPA certified...",
+    "job": { "title": "Finance Director", "description": "...", "must_haves": ["CPA"] },
+    "pipeline_template": "## Goal 1: Intro [pending]\n- [pending] Tell: Hi!..."
+  }'
+
+# 2. After candidate replies — update goals + summary
+curl -X POST http://localhost:8787/pipeline/analyse \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer test-token-local" \
+  -d '{
+    "candidate": { "name": "John Miller", "language": "en" },
+    "summary": "## Candidate Summary...",
+    "goals": "## Goal 1: Intro [completed]...",
+    "candidate_reply": "Yes, I have my CPA since 2012.",
+    "conversation_history": [...]
+  }'
+
+# 3. Generate next message
+curl -X POST http://localhost:8787/pipeline/write-message \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer test-token-local" \
+  -d '{
+    "candidate": { "name": "John Miller", "language": "en" },
+    "next_item": "Years of financial leadership experience?",
+    "conversation_history": [...],
+    "job": { "title": "Finance Director", "interviewer_name": "Vladimir" },
+    "context": { "is_follow_up": false }
+  }'
+
+# 4. Validate before sending (optional)
+curl -X POST http://localhost:8787/pipeline/validate-message \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer test-token-local" \
+  -d '{
+    "recent_messages": [...],
+    "proposed_message": "Great to hear about your CPA...",
+    "candidate": { "name": "John Miller", "language": "en" }
+  }'
+
+# 5. When all_done=true — final wrap-up
+curl -X POST http://localhost:8787/pipeline/completion ...
+```
+
+**Goal structure**: Goals are sequential (`[pending]` → `[active]` → `[completed]`). Items within goals are also sequential (`[pending]` → `[active]` → `[done]`). ACTION items (`Tell:`, `Mention:`, `Share:`) are auto-marked done after the bot sends them. The `pipeline_template` defines the ground truth structure — LLM cannot invent or remove goals/items.
+
+## Tests
+
+```bash
+npm test                  # all tests (deterministic + LLM)
+npm run test:llm          # LLM tests only (calls production API)
+```
+
+41 tests: goal-utils (14), text-utils (10), validate deterministic (7), Russian pipeline LLM (5), English pipeline LLM (3).
+
 ## Deploy
 
 ```bash
@@ -130,6 +203,6 @@ wrangler deploy
 ## Tech stack
 
 - **Runtime**: Cloudflare Worker
-- **LLM**: Google Gemini 2.0 Flash via REST API
+- **LLM**: Gemini 2.5 Flash (pipeline) + Gemini 2.0 Flash (evaluate, questions) via REST API
 - **Language**: TypeScript
-- **Key rotation**: Round-robin across comma-separated `GEMINI_API_KEYS`
+- **Key rotation**: Round-robin for evaluate/questions, retry-with-rotation for pipeline (429/5xx handling)
