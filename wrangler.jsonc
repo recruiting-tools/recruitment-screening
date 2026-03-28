@@ -1,0 +1,9 @@
+{
+  "name": "recruitment-screening",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-01-01",
+  "compatibility_flags": ["nodejs_compat"],
+  // Secrets (set via `wrangler secret put`):
+  // - GEMINI_API_KEYS — comma-separated Gemini API keys (round-robin rotation)
+  // - AUTH_TOKEN — Bearer token for authenticating callers
+}
