@@ -16,6 +16,8 @@ Stateless Cloudflare Worker that evaluates candidate resumes, generates voice-in
 |--------|------|-------------|
 | `GET` | `/` | API docs page (HTML) |
 | `GET` | `/health` | Health check |
+| `GET` | `/api/mcp/manifest` | MCP tool registry (8 tools, 2 playbooks) |
+| `POST` | `/match` | Lightweight candidate-job matching for ranking |
 | `POST` | `/evaluate` | Resume screening + evaluation |
 | `POST` | `/generate-questions` | Interview question generation |
 | `POST` | `/pipeline/init` | Initialize pipeline goals + summary from resume |

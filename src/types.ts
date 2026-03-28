@@ -59,6 +59,26 @@ export interface EvaluateResponse {
   additional_interview_questions: InterviewQuestion[];
 }
 
+// ── Match (lightweight evaluation for ranking) ─────────────────────────────
+
+export interface MatchRequest {
+  resume_text: string;
+  job_description: string;
+  job_title?: string;
+  must_haves?: string[];
+  custom_prompt?: string | null;
+}
+
+export interface MatchResponse {
+  score: number;           // 0-100
+  verdict: 'strong_yes' | 'yes' | 'maybe' | 'no' | 'strong_no';
+  summary: string;         // 2-3 sentence justification
+  matched_skills: string[];
+  missing_skills: string[];
+  red_flags: string[];
+  request_id: string;
+}
+
 // ── Generate Questions ──────────────────────────────────────────────────────
 
 export type Language = 'en' | 'ru' | 'it';

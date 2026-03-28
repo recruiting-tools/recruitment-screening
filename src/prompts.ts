@@ -108,6 +108,50 @@ Evaluate this candidate. Return a JSON object with this exact structure:
   };
 }
 
+// ── Match prompt (lightweight, for ranking) ─────────────────────────────────
+
+export function buildMatchPrompt(req: { resume_text: string; job_description: string; job_title?: string; must_haves?: string[]; custom_prompt?: string | null }): { system: string; user: string } {
+  const customPart = req.custom_prompt ? `\n\nAdditional instructions:\n${req.custom_prompt}` : '';
+
+  const mustHavesList = req.must_haves?.length
+    ? `\n\nMust-have requirements (deal-breakers):\n${req.must_haves.map((m, i) => `${i + 1}. ${m}`).join('\n')}`
+    : '';
+
+  return {
+    system: `You are an expert recruiter scoring a candidate's resume against a job description. Be concise and fast.
+
+Scoring guide:
+- 85-100 (strong_yes): Exceeds requirements, ideal candidate
+- 70-84 (yes): Meets all must-haves, solid fit
+- 50-69 (maybe): Meets most requirements, worth a conversation
+- 25-49 (no): Missing key requirements
+- 0-24 (strong_no): Clearly unqualified
+
+When must-haves are specified, treat them as deal-breakers — missing a must-have caps the score at 49.
+
+${CURRENCY_NOTE}${customPart}`,
+
+    user: `${req.job_title ? `Job Title: ${req.job_title}\n\n` : ''}Job Description:
+${req.job_description}
+${mustHavesList}
+
+Candidate Resume:
+${req.resume_text}
+
+Return JSON:
+{
+  "score": <0-100>,
+  "verdict": "<strong_yes|yes|maybe|no|strong_no>",
+  "summary": "<2-3 sentence justification>",
+  "matched_skills": ["skill1", "skill2"],
+  "missing_skills": ["skill3"],
+  "red_flags": ["flag1"]
+}
+
+Be specific: reference actual experience from the resume. Keep matched/missing to 3-6 items each.`,
+  };
+}
+
 // ── Interview Questions prompt ───────────────────────────────────────────────
 
 export function buildQuestionsPrompt(req: EvaluateRequest, screeningQuestions: string[]): { system: string; user: string } {

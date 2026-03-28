@@ -1,10 +1,11 @@
 import type {
   Env, EvaluateRequest, EvaluateResponse, Screening, Evaluation, InterviewQuestion,
   GenerateQuestionsRequest, GenerateQuestionsResponse, GeneratedQuestion, InterviewEngineQuestion,
-  ComplianceResult,
+  ComplianceResult, MatchRequest, MatchResponse,
 } from './types';
-import { askGemini, parseJSON, pickKey } from './gemini';
-import { buildScreeningPrompt, buildEvaluationPrompt, buildQuestionsPrompt, buildGenerateQuestionsPrompt } from './prompts';
+import { askGemini, askGeminiWithRetry, parseJSON, pickKey } from './gemini';
+import { buildScreeningPrompt, buildEvaluationPrompt, buildQuestionsPrompt, buildGenerateQuestionsPrompt, buildMatchPrompt } from './prompts';
+import { buildManifest } from './manifest';
 import { renderDocs } from './docs';
 
 // Pipeline handlers
@@ -44,9 +45,23 @@ export default {
       return handleEvaluate(request, env);
     }
 
+    // Match endpoint (lightweight evaluation for ranking)
+    if (url.pathname === '/match' && request.method === 'POST') {
+      return handleMatch(request, env);
+    }
+
     // Generate questions endpoint
     if (url.pathname === '/generate-questions' && request.method === 'POST') {
       return handleGenerateQuestions(request, env);
+    }
+
+    // MCP manifest (tool registry for recruiter-mcp)
+    if (url.pathname === '/api/mcp/manifest' && request.method === 'GET') {
+      const authHeader = request.headers.get('Authorization');
+      if (authHeader !== `Bearer ${env.AUTH_TOKEN}`) {
+        return json({ error: 'Unauthorized' }, 401);
+      }
+      return json(buildManifest());
     }
 
     // ── Pipeline endpoints ────────────────────────────────────────────────
@@ -305,6 +320,42 @@ async function runComplianceCheck(
     return { status: 'failed', error: `interview-engine ${res.status}: ${errorBody.slice(0, 300)}` };
   } catch (err) {
     return { status: 'failed', error: `Connection failed: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+// ── Match handler (lightweight evaluation for ranking) ─────────────────────
+
+async function handleMatch(request: Request, env: Env): Promise<Response> {
+  const authHeader = request.headers.get('Authorization');
+  if (authHeader !== `Bearer ${env.AUTH_TOKEN}`) {
+    return json({ error: 'Unauthorized' }, 401);
+  }
+
+  let req: MatchRequest;
+  try {
+    req = await request.json() as MatchRequest;
+  } catch {
+    return json({ error: 'Invalid JSON body' }, 400);
+  }
+
+  if (!req.resume_text?.trim()) return json({ error: 'resume_text is required' }, 400);
+  if (!req.job_description?.trim()) return json({ error: 'job_description is required' }, 400);
+
+  try {
+    const requestId = `req_${crypto.randomUUID().slice(0, 12)}`;
+    const prompt = buildMatchPrompt(req);
+    const raw = await askGeminiWithRetry(env.GEMINI_API_KEYS, prompt.system, prompt.user, {
+      model: 'gemini-2.5-flash',
+      maxOutputTokens: 800,
+      temperature: 0.2,
+    });
+    const result = parseJSON<Omit<MatchResponse, 'request_id'>>(raw, 'match');
+
+    return json({ ...result, request_id: requestId });
+  } catch (err) {
+    console.error('[match] Error:', err);
+    const message = err instanceof Error ? err.message : 'Internal error';
+    return json({ error: message }, 500);
   }
 }
 

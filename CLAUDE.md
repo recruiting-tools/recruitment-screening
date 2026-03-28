@@ -8,11 +8,17 @@ Stateless Cloudflare Worker that evaluates candidate resumes against job descrip
 GET /          → Self-documenting API page (HTML)
 GET /health    → {"status": "ok"}
 
+POST /match    → Lightweight candidate-job matching (score + verdict for ranking)
+  Auth → Gemini 2.5 Flash (with retry) → JSON
+
 POST /evaluate → Resume screening + evaluation
   Auth → Parallel [Screening, Evaluation] → Optional questions → JSON
 
 POST /generate-questions → Interview question generation
   Auth → Gemini (with best-practice prompt) → Optional compliance check → JSON
+
+GET /api/mcp/manifest → MCP tool registry manifest for recruiter-mcp
+  Auth → Static JSON (8 tools + 2 playbooks)
 
 POST /pipeline/init           → Initialize pipeline goals + summary from resume
 POST /pipeline/analyse        → Update goals/summary after candidate reply
@@ -39,6 +45,7 @@ POST /pipeline/validate-message → Quality check before sending
 | `src/types.ts` | TypeScript interfaces (Env, evaluate/questions requests & responses) |
 | `src/prompts.ts` | Prompt builders: screening, evaluation, legacy questions, generate-questions |
 | `src/gemini.ts` | Gemini API client: `askGemini` (single key), `askGeminiWithRetry` (rotation + 429 retry) |
+| `src/manifest.ts` | MCP tool registry manifest (`GET /api/mcp/manifest`) |
 | `src/docs.ts` | Self-documenting HTML page served at `GET /` |
 | `src/pipeline/types.ts` | Pipeline request/response interfaces for all 5 endpoints |
 | `src/pipeline/prompts.ts` | Pipeline prompt builders + style rules (from candidate-routing prompt-catalog) |
@@ -53,6 +60,36 @@ POST /pipeline/validate-message → Quality check before sending
 | `.dev.vars` | Local secrets for `wrangler dev` (gitignored) |
 
 ## API
+
+### `POST /match`
+
+**Auth**: `Authorization: Bearer <AUTH_TOKEN>`
+
+Lightweight candidate-job matching for ranking. Faster than `/evaluate` — no candidate-facing screening, just score + verdict.
+
+**Request**:
+```json
+{
+  "resume_text": "string (required)",
+  "job_description": "string (required)",
+  "job_title": "string (optional)",
+  "must_haves": ["string"],
+  "custom_prompt": "string | null"
+}
+```
+
+**Response**:
+```json
+{
+  "score": 78,
+  "verdict": "yes",
+  "summary": "Strong match: 15 years finance, CPA certified, SAP experience.",
+  "matched_skills": ["CPA certified", "15 years corporate finance", "SAP experience"],
+  "missing_skills": ["M&A experience unclear"],
+  "red_flags": [],
+  "request_id": "req_abc123"
+}
+```
 
 ### `POST /evaluate`
 
@@ -401,14 +438,73 @@ Markdown-based goal tracking with sequential execution:
 - `markActiveActionsDone()` — post-writer processing: marks ACTION items done, handles goal completion chain
 - `findNewlyActivatedItems()` / `findNewlyDoneItems()` — diff helpers for state transitions
 
+## MCP Tool Registry
+
+This service exposes tools for recruiter-mcp via `GET /api/mcp/manifest`.
+
+### Contract
+- Endpoint: `GET /api/mcp/manifest` (protected by AUTH_TOKEN)
+- Format: see `recruiter-mcp/docs/tool-registry-spec.md`
+- recruiter-mcp fetches manifest at startup and dynamically registers tools
+
+### Registered tools (prefix `scr_`)
+
+| Tool | Endpoint | Category |
+|------|----------|----------|
+| `scr_match` | `POST /match` | evaluation |
+| `scr_evaluate` | `POST /evaluate` | evaluation |
+| `scr_generate_questions` | `POST /generate-questions` | questions |
+| `scr_pipeline_init` | `POST /pipeline/init` | pipeline |
+| `scr_pipeline_analyse` | `POST /pipeline/analyse` | pipeline |
+| `scr_pipeline_write_message` | `POST /pipeline/write-message` | pipeline |
+| `scr_pipeline_completion` | `POST /pipeline/completion` | pipeline |
+| `scr_pipeline_validate` | `POST /pipeline/validate-message` | pipeline |
+
+### Playbooks
+- `rank_candidates` — score and rank a batch of candidates for a job
+- `prepare_interview` — generate interview script from match gaps
+
+### How to add a new tool
+1. Create the API endpoint as usual
+2. Add tool description to `src/manifest.ts`
+3. Done — recruiter-mcp picks it up on next restart
+
+### Rules
+- `name` globally unique — use `scr_` prefix
+- `description` is for LLM: what it does + when to use + what it returns
+- Every parameter must have a `description`
+- Use `enum` for parameters with fixed values
+- Don't delete tools — mark `deprecated: true` first, remove after 2 weeks
+
+### recruiter-mcp config
+
+In recruiter-mcp `services.json`:
+```jsonc
+{
+  "name": "recruitment-screening",
+  "manifest_url_env": "SCREENING_API_URL",
+  "manifest_path": "/api/mcp/manifest",
+  "env": {
+    "base_url": "SCREENING_API_URL",
+    "token": "SCREENING_API_TOKEN"
+  }
+}
+```
+
+Env vars for MCP config:
+- `SCREENING_API_URL` → `https://recruitment-screening.dev-a96.workers.dev`
+- `SCREENING_API_TOKEN` → same as `AUTH_TOKEN`
+
 ## Next Steps
 
-- [ ] Deploy to Cloudflare (`wrangler deploy`)
-- [ ] Set production secrets (`GEMINI_API_KEYS`, `AUTH_TOKEN`)
+- [x] Deploy to Cloudflare (`wrangler deploy`)
+- [x] Set production secrets (`GEMINI_API_KEYS`, `AUTH_TOKEN`)
+- [x] Add vitest + unit tests for goal-utils and text-utils (41 tests)
+- [x] Pipeline endpoints (init, analyse, write-message, completion, validate)
+- [x] `POST /match` — lightweight matching for ranking
+- [x] MCP tool registry manifest (`GET /api/mcp/manifest`)
+- [ ] Register in recruiter-mcp `services.json`
 - [ ] Integrate in apply-via-resume `handleConfirm()`
 - [ ] Shadow mode client in candidate-routing (`src/lib/screening-client.ts`)
-- [ ] Connect shadow mode to `pipelineWriteMessage` in candidate-routing
-- [ ] Add vitest + unit tests for goal-utils and text-utils
-- [ ] Add integration tests with real production dialogs (5+ fixtures)
 - [ ] Phase 2: switch candidate-routing to use this API as primary (not shadow)
 - [ ] Phase 3: externalize prompts to `hiring-pipeline-config` repo
